@@ -1670,6 +1670,7 @@ void uEyeCamera::setGain(int newVal)
 		/* Set sensor source gain to max */
 		if (nGain > rangeSourceGain.s32Max)
 		{
+			qDebug() << "Source Gain Max value is: " << rangeSourceGain.s32Max;
 			nGain = rangeSourceGain.s32Max;
 		}
 		
@@ -1692,5 +1693,41 @@ void uEyeCamera::setGamma(int newVal)
 	if (nRet == IS_SUCCESS)
 	{
 		qDebug() << "Gamma is set to: " << nGamma;
+	}
+}
+
+
+void uEyeCamera::setGainBoost()
+{
+	INT nRet = is_SetGainBoost(currentCam, IS_SET_GAINBOOST_ON);
+	if (nRet == IS_SUCCESS)
+	{
+		qDebug() << "Hardware Gain Boost activated.";
+	}
+	
+	
+	if (nRet == IS_NO_SUCCESS)
+	{
+		qDebug() << "Hardware Gain Boost not activated.";
+	}
+	
+}
+
+
+void uEyeCamera::setHWGain(int val)
+{
+	INT nRet = is_SetHardwareGain(currentCam, val, IS_IGNORE_PARAMETER, IS_IGNORE_PARAMETER, IS_IGNORE_PARAMETER);
+
+
+
+	if (nRet == IS_SUCCESS)
+	{
+		qDebug() << "Hardware Gain set to: " << val;
+	}
+
+
+	if (nRet == IS_NO_SUCCESS)
+	{
+		qDebug() << "Hardware Gain NOT set";
 	}
 }

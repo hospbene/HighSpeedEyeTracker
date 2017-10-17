@@ -24,10 +24,19 @@
 #include "algo.h"
 
 // Fixed variables
-#define screen_width  1680
-#define screen_height 1050
-#define apertureWidth  800
-#define apertureHeight 600
+#define SCREEN_WIDTH  1680
+#define SCREEN_HEIGHT 1050
+#define APERTURE_WIDTH  800
+#define APERTURE_HEIGHT 600
+
+#define HARDWARE_GAIN 255
+#define GAMMA	220
+#define HW_GAIN 100
+
+#define PUPILSIZE 6
+#define FIRST_EYE_THRESH 254
+#define SECOND_EYE_THRESH 252
+#define GLINT_THRESH 216
 
 /** Global variables */
 cv::CascadeClassifier eye_cascade;
@@ -52,32 +61,31 @@ struct sortByX
 
 Point2d oldPupilCenterLeft = 0;
 Point2d oldPupilCenterRight = 0;
-
 string userPath;
 string userFile;
 
 // Objects
-uEyeCamera cam;					//Get object of uEye Camera
-CameraCalibration camCalib;
-SubjectCalibration subCalib;
+uEyeCamera cam;					// uEye Camera object
+CameraCalibration camCalib;		// Camera calibration object
+SubjectCalibration subCalib;	// subject calibration object
 cv::VideoWriter videoWriter;
 
 
 
 
-
 // CALIBRATION
-PolyFit gem = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY); //=> y often negative
-//PolyFit gem = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY);	//both motls extremely small
-//PolyFit gem = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XXYY); //=> diagonal in the beginning
-//PolyFit gem = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XYY_YXX); //=> totally negative values
-//PolyFit gem = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XYY_YXX_XXYY);
-//PolyFit gem = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XYY_YXX_XXX_YYY);  //=> -1 -1 
+//PolyFit gemLeft = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY);							//=> only up and down is projected
+//PolyFit gemLeft = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY);						//both motls extremely small
+//PolyFit gemLeft = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XXYY);				//=> diagonal in the beginning
+PolyFit gemLeft = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XYY_YXX);				//=> best Result for right EyeVector 
+//PolyFit gemLeft = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XYY_YXX_XXYY);		// best results. 
+
+//PolyFit gemLeft = PolyFit::PolyFit(PolyFit::POLY_1_X_Y_XY_XX_YY_XYY_YXX_XXX_YYY);  //=> -1 -1 
 
 // DEBUG
-boolean drawGlints = true;
-boolean drawPupil = false;
+boolean drawDetection = true;
 boolean calibrated = false;
+boolean showDetection = false;
 
 
 // Key press event handler
@@ -85,24 +93,25 @@ keyEnterReceiver* keyPressedReceiver = new keyEnterReceiver();
 
 
 // Adjustable Trackbar values
-int secondEyeThresh = 234;
-int firstEyeThresh = 250;
-int gain = 100;
-int gamma = 220;
+int firstEyeThresh = FIRST_EYE_THRESH;
+int secondEyeThresh = SECOND_EYE_THRESH;
+int glintLower = GLINT_THRESH;
 
-int contourEllipseSlider = 120; //70
+int gain = HARDWARE_GAIN;
+int gamma = GAMMA;
+int hwGain = HW_GAIN;
+
+
+
+
+int contourEllipseSlider = 120; 
 int minboxW = 20;
 int maxboxW = 97;
-int pupilSize = 6;
+int pupilSize = PUPILSIZE;
 
 
 
-int minboxH = 1;
-int maxboxH = 255;
-
-
-
-// Mouse handler
+// Trackbar functions
 void CallBackFunc(int event, int x, int y, int flags, void* userdata)
 {
 	if (event == EVENT_LBUTTONDOWN)
@@ -124,6 +133,30 @@ void CallBackFunc(int event, int x, int y, int flags, void* userdata)
 	}
 }
 
+static void onGammaChange(int v, void *ptr)
+{
+	// resolve 'this':
+	GoalkeeperAnalysis *that = (GoalkeeperAnalysis*)ptr;
+	that->changeGamma(v);
+}
+
+static void onGainChange(int v, void *ptr)
+{
+	// resolve 'this':
+	GoalkeeperAnalysis *that = (GoalkeeperAnalysis*)ptr;
+	that->changeGain(v);
+}
+
+static void onHWGainChange(int v, void *ptr)
+{
+	// resolve 'this':
+	GoalkeeperAnalysis *that = (GoalkeeperAnalysis*)ptr;
+	that->changeHWGain(v);
+}
+
+
+
+
 
 
 GoalkeeperAnalysis::GoalkeeperAnalysis(QWidget *parent) : QMainWindow(parent)
@@ -131,10 +164,6 @@ GoalkeeperAnalysis::GoalkeeperAnalysis(QWidget *parent) : QMainWindow(parent)
 	// QT STUFF
 	ui.setupUi(this);
 	scene = new QGraphicsScene(this);
-
-
-
-	
 
 // GUI SLOTS ============================================================================
 	connect(ui.showPlaybackButton, SIGNAL(clicked()), this, SLOT(showPlayback()));			// Connect Open camera Button with a function
@@ -146,65 +175,47 @@ GoalkeeperAnalysis::GoalkeeperAnalysis(QWidget *parent) : QMainWindow(parent)
 // Windows for showing images
 	namedWindow("Frame1", cv::WINDOW_KEEPRATIO | cv::WINDOW_AUTOSIZE);
 
-	//set the callback function for any mouse event
+//set the callback function for any mouse event
 	setMouseCallback("Frame1", CallBackFunc, NULL);
-
-
 	namedWindow("Frame2", cv::WINDOW_KEEPRATIO | cv::WINDOW_AUTOSIZE);
-
 	setMouseCallback("Frame2", CallBackFunc, NULL);
-
 	namedWindow("Difference", cv::WINDOW_KEEPRATIO | cv::WINDOW_AUTOSIZE);
 	namedWindow("UserVideo", CV_WINDOW_NORMAL);
-
 	namedWindow("RightEye", cv::WINDOW_KEEPRATIO | cv::WINDOW_AUTOSIZE);
 	namedWindow("LeftEye", cv::WINDOW_KEEPRATIO | cv::WINDOW_AUTOSIZE);
-
 	namedWindow("Control0", CV_WINDOW_NORMAL);
 	createTrackbar("1st Eye Thresh:", "Control0", &firstEyeThresh, 255);
 	createTrackbar("2nd Eye Thresh:", "Control0", &secondEyeThresh, 255);
 	createTrackbar("Glint Thresh", "Control0", &glintLower, 255);
-	createTrackbar("Gain", "Control0", &gain, 100);
-	createTrackbar("Gamma", "Control0", &gamma, 220);
-	//createTrackbar("threshold", "Control0", &contourEllipseSlider, 255 );
+	createTrackbar("Gain", "Control0", &gain, 255,onGainChange,this);
+	createTrackbar("Gamma", "Control0", &gamma, 220,onGammaChange,this);
+	createTrackbar("HW_Gain", "Control0", &hwGain, 220, onHWGainChange, this);
 	createTrackbar("PupilSize", "Control0", &pupilSize, 255);
-	//createTrackbar("minBoxW", "Control0", &minboxW, 255);
-	//createTrackbar("maxBoxW", "Control0", &maxboxW, 255);
-	//createTrackbar("minBoxH", "Control0", &minboxH, 255);
-	//createTrackbar("maxBoxH", "Control0", &maxboxH, 255);
+
 
 // CALIBRATION STUFF
 	//camCalib.start();
 	//subCalib.setParameters(camCalib.focalLength, camCalib.principalPoint, camCalib.rotationMatrix, camCalib.translationVector, camCalib.principalPoint_pixels_c, camCalib.principalPoint_pixels_r, camCalib.pixelPitch_mm_c, camCalib.pixelPitch_mm_r);
 
-// Load Cascade for EyeRegionDetection
-	eye_cascade.load("haarcascade_eye.xml");
+
+	eye_cascade.load("haarcascade_eye.xml");		// Load Cascade for EyeRegionDetection
+	outputfile.open("data.txt");					// Open Files for data output
 
 
-// Open Files for data output
-	outputfile.open("data.txt");
-
-
-
-// Set Default values
-	FPS = 500;
+	FPS = 500;										// Set Default values
 	exposureTime = 1.6;
-	setPupilDetectionParams();
+	cam.setGamma(gamma);
+	cam.setGain(gain);
+	cam.setGainBoost();
+	cam.setHWGain(100);
+	readCameraSettings();							// Read settings of uEye camera
 
-// Read settings of uEye camera
-	readCameraSettings();
+	
+	//createUserFiles();							// create new user folder and upload video
+	
+	this->installEventFilter(keyPressedReceiver);	// install thread safe key pressed event handling
+	
 
-
-	// Set up detector with params
-	pupilDetector = SimpleBlobDetector::create(pupilParams);
-
-
-	// create new user folder and upload video
-	//createUserFiles();
-
-
-	// install thread safe key pressed event handling
-	this->installEventFilter(keyPressedReceiver);
 }
 
 
@@ -212,7 +223,7 @@ void GoalkeeperAnalysis::createUserFiles()
 {
 	// get name of user
 	dialog = new Dialog;
-	dialog->setWindowTitle("Dialog");
+	dialog->setWindowTitle("Auswahl Stimulusvideo");
 	dialog->setWindowFlags(Qt::WindowStaysOnTopHint);
 	connect(dialog, SIGNAL(accepted()), this, SLOT(GetDialogOutput()));
 	dialog->show();
@@ -300,7 +311,6 @@ void GoalkeeperAnalysis::GetDialogOutput()
 }
 
 // ========================================================================== INITIAL SETUP
-
 void GoalkeeperAnalysis::readCameraSettings()
 {
 
@@ -313,72 +323,10 @@ void GoalkeeperAnalysis::readCameraSettings()
 	cam.setExposure(exposureTime);
 	cam.setFlash();
 
-	cam.setGain(gain);
-	cam.setGamma(gamma);
-
 }
-
-
-void GoalkeeperAnalysis::setPupilDetectionParams()
-{
-	
-	// Change thresholds
-	//pupilParams.minThreshold = 40;	//10
-	//pupilParams.maxThreshold = 80;	// 40
-
-	/*
-	// Filter by Area.
-	pupilParams.filterByArea = true;
-	pupilParams.minArea = 200;		// 200
-	pupilParams.maxArea = 4000;		// 4000
-
-	// Filter by Circularity
-	pupilParams.filterByCircularity = true;
-	pupilParams.minCircularity = 0.4;			// 0.5
-	pupilParams.maxCircularity = 0.9;
-
-	// Filter by Convexity
-	pupilParams.filterByConvexity = false;
-	pupilParams.minConvexity = 0.4;
-
-	// Filter by Inertia
-	pupilParams.filterByInertia = false;
-	pupilParams.minInertiaRatio = 0.1;
-
-	pupilParams.filterByColor = 1;
-	pupilParams.blobColor = 0;      //  to select darker blobs
-	//pupilParams.blobColor = 255;	// for lighter blobs.
-	
-	*/
-	
-	// Filter by Area.
-	pupilParams.filterByArea = true;
-	pupilParams.minArea = 40;		// 800
-	pupilParams.maxArea = 4000;		// 5000
-
-									// Filter by Circularity
-	pupilParams.filterByCircularity = true;
-	pupilParams.minCircularity = 0.1;			// 0.5
-
-												// Filter by Convexity
-	//pupilParams.filterByConvexity = false;
-	pupilParams.filterByConvexity = true;
-	pupilParams.minConvexity = 0.4;
-
-	// Filter by Inertia
-	pupilParams.filterByInertia = true;
-	pupilParams.minInertiaRatio = 0.1;
-
-	pupilParams.filterByColor = 1;
-	pupilParams.blobColor = 0;      //  to select darker blobs
-
-	
-}
-
 
 // ========================================================================== SETTINGS FOR EACH BUTTON FUNCTION
-
-// CALIBRATION SETTINGS: initialize settings for capturing and detecting for calibration with low speed
+// CALIBRATION SETTINGS: initialize settings for capture and detection with low speed (for calibration)
 void GoalkeeperAnalysis::calibrate()
 {
 	// WOLFGANG
@@ -387,6 +335,7 @@ void GoalkeeperAnalysis::calibrate()
 	cam.setExposure(4.0);	//4.0
 	cam.InitMemory();
 	cam.setFlash();
+
 	state = CALIBRATION;
 	startThreads();
 }
@@ -399,13 +348,13 @@ void GoalkeeperAnalysis::testingGaze()
 	cam.setExposure(4.0);	//4.0
 	cam.InitMemory();
 	cam.setFlash();
+
 	state = TESTING;
 	startThreads();
 
 }
 
-// SAVING SETTINGS:
-// initialize settings for capturing in high speed
+// SAVING SETTINGS: initialize settings for capturing in high speed
 void GoalkeeperAnalysis::getLiveView()
 {
 	initializeVideoWriter();
@@ -477,9 +426,9 @@ boolean GoalkeeperAnalysis::userIsReady()
 
 	namedWindow("UserVideo", -1);
 	cvSetWindowProperty("UserVideo", CV_WND_PROP_FULLSCREEN, CV_WINDOW_FULLSCREEN);
-	Mat bg(screen_height, screen_width, CV_8UC3, cv::Scalar(255, 255, 255));
-	cv::putText(bg, "To start experiment.", Point2f(40, (screen_height/2)-20), FONT_HERSHEY_SIMPLEX, 3.0, Scalar(0, 0, 0, 0), 6);
-	cv::putText(bg, "Press SPACE .", Point2f(40, (screen_height / 2)+ 120), FONT_HERSHEY_SIMPLEX, 5, Scalar(0, 0, 0, 0), 4);
+	Mat bg(SCREEN_HEIGHT, SCREEN_WIDTH, CV_8UC3, cv::Scalar(255, 255, 255));
+	cv::putText(bg, "To start experiment.", Point2f(40, (SCREEN_HEIGHT /2)-20), FONT_HERSHEY_SIMPLEX, 3.0, Scalar(0, 0, 0, 0), 6);
+	cv::putText(bg, "Press SPACE .", Point2f(40, (SCREEN_HEIGHT / 2)+ 120), FONT_HERSHEY_SIMPLEX, 5, Scalar(0, 0, 0, 0), 4);
 	imshow("UserVideo",bg);
 	
 	// Loop until escape is pressed
@@ -632,19 +581,19 @@ void GoalkeeperAnalysis::showCalibration()
 	setMouseCallback("Calibration", CallBackFunc, NULL);
 
 	
-	//getDesktopResolution(screen_width, screen_height);
-	byte timeToShowEachCross = 3;
+	//getDesktopResolution(SCREEN_WIDTH, SCREEN_HEIGHT);
+	byte timeToShowEachCross = 5;
 
 
-	Point2d firstCross = cv::Point(screen_width / 10, screen_height / 15 * 2);
-	Point2d secondCross = cv::Point(screen_width / 10 * 5, screen_height / 15 * 2);
-	Point2d thirdCross = cv::Point(screen_width / 10 * 9, screen_height / 15 * 2);
-	Point2d fourthCross = cv::Point(screen_width / 10, screen_height / 15 * 7);
-	Point2d fifthCross = cv::Point(screen_width / 10 * 5, screen_height / 15 * 7);
-	Point2d sixthCross = cv::Point(screen_width / 10 * 9, screen_height / 15 * 7);
-	Point2d seventhCross = cv::Point(screen_width / 10, screen_height / 15 * 12);
-	Point2d eighthCross = cv::Point(screen_width / 10 * 5, screen_height / 15 * 12);
-	Point2d ninethCross = cv::Point(screen_width / 10 * 9, screen_height / 15 * 12);
+	Point2d firstCross = cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 2);
+	Point2d secondCross = cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 2);
+	Point2d thirdCross = cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 2);
+	Point2d fourthCross = cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 7);
+	Point2d fifthCross = cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 7);
+	Point2d sixthCross = cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 7);
+	Point2d seventhCross = cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 12);
+	Point2d eighthCross = cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 12);
+	Point2d ninethCross = cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 12);
 
 	qDebug() << firstCross.x << firstCross.y << endl;
 	qDebug() << secondCross.x << secondCross.y << endl;
@@ -657,7 +606,7 @@ void GoalkeeperAnalysis::showCalibration()
 	qDebug() << ninethCross.x << ninethCross.y << endl;
 
 	// Initial Instruction window
-	Mat bg(screen_height, screen_width, CV_8UC3, cv::Scalar(255, 255, 255));
+	Mat bg(SCREEN_HEIGHT, SCREEN_WIDTH, CV_8UC3, cv::Scalar(255, 255, 255));
 	cv::putText(bg, "To calibrate the system you need to focus on the 9 different spots shown below sequentially. Please focus on the center of the cross ", Point2f(20, 20), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0, 0), 1);
 	cv::putText(bg, "as long as it is shown. Press any key to start calibration and to continue. Please focus each number for about 2 seconds.", Point2f(20, 40), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0, 0), 1);
 
@@ -745,15 +694,16 @@ void GoalkeeperAnalysis::showCalibration()
 
 	cv::imshow("Calibration", bg);
 	cv::waitKey();
+	tempFoundPoints.clear();
 	bg = Scalar(255, 255, 255, 0);
 
 	// Start sequence
 	outputfile << "Cross1";
 
 
-	cv::drawMarker(bg, cv::Point(screen_width / 10, screen_height / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 1     0,0
-	cv::circle(bg, cv::Point(screen_width / 10, screen_height / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "1", Point2f((screen_width / 10) + 20, (screen_height / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 1     0,0
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "1", Point2f((SCREEN_WIDTH / 10) + 20, (SCREEN_HEIGHT / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -762,9 +712,9 @@ void GoalkeeperAnalysis::showCalibration()
 
 	outputfile << "Cross2" << endl;
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10 * 5, screen_height / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 2     0,1
-	cv::circle(bg, cv::Point(screen_width / 10 * 5, screen_height / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "2", Point2f((screen_width / 10 * 5) + 20, (screen_height / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 2     0,1
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "2", Point2f((SCREEN_WIDTH / 10 * 5) + 20, (SCREEN_HEIGHT / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -773,9 +723,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross3" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 3     0,2
-	cv::circle(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "3", Point2f((screen_width / 10 * 9) + 20, (screen_height / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 3     0,2
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "3", Point2f((SCREEN_WIDTH / 10 * 9) + 20, (SCREEN_HEIGHT / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -784,9 +734,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross4" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10, screen_height / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 4     1,0
-	cv::circle(bg, cv::Point(screen_width / 10, screen_height / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "4", Point2f((screen_width / 10) + 20, (screen_height / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 4     1,0
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "4", Point2f((SCREEN_WIDTH / 10) + 20, (SCREEN_HEIGHT / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -795,9 +745,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross5" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10 * 5, screen_height / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 5     1,1 
-	cv::circle(bg, cv::Point(screen_width / 10 * 5, screen_height / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "5", Point2f((screen_width / 10 * 5) + 20, (screen_height / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 5     1,1 
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "5", Point2f((SCREEN_WIDTH / 10 * 5) + 20, (SCREEN_HEIGHT / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -806,9 +756,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross6" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 6     1,2
-	cv::circle(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "6", Point2f((screen_width / 10 * 9) + 20, (screen_height / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 6     1,2
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "6", Point2f((SCREEN_WIDTH / 10 * 9) + 20, (SCREEN_HEIGHT / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -817,9 +767,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross7" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10, screen_height / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);             // 7     2,0
-	cv::circle(bg, cv::Point(screen_width / 10, screen_height / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "7", Point2f((screen_width / 10) + 20, (screen_height / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);             // 7     2,0
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "7", Point2f((SCREEN_WIDTH / 10) + 20, (SCREEN_HEIGHT / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -828,9 +778,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross8" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10 * 5, screen_height / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 8     2,1
-	cv::circle(bg, cv::Point(screen_width / 10 * 5, screen_height / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "8", Point2f((screen_width / 10 * 5) + 20, (screen_height / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 8     2,1
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "8", Point2f((SCREEN_WIDTH / 10 * 5) + 20, (SCREEN_HEIGHT / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -839,9 +789,9 @@ void GoalkeeperAnalysis::showCalibration()
 	outputfile << "Cross9" << endl;
 
 	bg = Scalar(255, 255, 255, 0);
-	cv::drawMarker(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 9     2,2
-	cv::circle(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	cv::putText(bg, "9", Point2f((screen_width / 10 * 9) + 20, (screen_height / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	cv::drawMarker(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 9     2,2
+	cv::circle(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	cv::putText(bg, "9", Point2f((SCREEN_WIDTH / 10 * 9) + 20, (SCREEN_HEIGHT / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
 	cv::imshow("Calibration", bg);
 	waitKey(1);
 	boost::this_thread::sleep(boost::posix_time::milliseconds(3000));
@@ -862,7 +812,7 @@ void GoalkeeperAnalysis::showCalibration()
 		// Print every found point. glint left and right and pupil left and right. for every frame and on every calibration point
 		if (true)
 		{
-			qDebug() << " Cross 1";
+			qDebug() << "\n\n\n Cross 1";
 			for (std::vector<pupilGlintCombiInstance>::iterator it = allPointsFoundOn1.begin(); it != allPointsFoundOn1.end(); it++)
 			{
 				it->toString();
@@ -878,7 +828,7 @@ void GoalkeeperAnalysis::showCalibration()
 			{
 				it->toString();
 			}
-			qDebug() << "\n Cross 42";
+			qDebug() << "\n Cross 4";
 			for (std::vector<pupilGlintCombiInstance>::iterator it = allPointsFoundOn4.begin(); it != allPointsFoundOn4.end(); it++)
 			{
 				it->toString();
@@ -913,7 +863,7 @@ void GoalkeeperAnalysis::showCalibration()
 
 		// 1. Get mean value for glints and pupil in each cross
 		// allPointsFoundOn1 to  allPointsFoundOn9 contains all Found glint positions and pupil positiones found at cross X
-		// mean Values are stored in strucuter point1 to point9
+		// mean Values are stored in structure point1 to point9
 
 		// Calc Mean values of glints and pupil centers for each calibration point
 		getMeanValues(allPointsFoundOn1, &point1);
@@ -937,14 +887,12 @@ void GoalkeeperAnalysis::showCalibration()
 		allPoints.push_back(point8);
 		allPoints.push_back(point9);
 
-		//getMeanValuesForGlints();
-
 		// 3. Create Matrix for Eye Left and Right by creating eyevectors for each combination
-
-		// Feed Thiagos algorithm
-		collect();
-		
 		m_bIsCaptureRunning = false;
+
+			// Feed Thiagos algorithm
+			collect();
+		
 	}
 	
 }
@@ -952,30 +900,49 @@ void GoalkeeperAnalysis::showCalibration()
 // input is 
 void GoalkeeperAnalysis::collect()
 {
-		vector<CollectionTuple> tuples;
-		for (int i = 0; i< allPoints.size(); i++) 
-		{
-			EyeData ed;
-			ed.pupil.center.x = allPoints[i].pupilLeft.x;
-			ed.pupil.center.y = allPoints[i].pupilLeft.y;
+		
+// PupilVector
+	vector<CollectionTuple> tuples;
+	for (int i = 0; i < allPoints.size(); i++)
+	{
+	
 
-			qDebug() << "Eyedata: " << allPoints[i].pupilLeft.x << allPoints[i].pupilLeft.y;
+		// Pupil only
+		//Point2d eyeVec = allPoints[i].pupilLeft;
+		//Point2d eyeVec = allPoints[i].pupilRight;
 
-			FieldData fd;
-			fd.collectionMarker.center.x = allPoints[i].centerOfCrossOnScreen.x;
-			fd.collectionMarker.center.y = allPoints[i].centerOfCrossOnScreen.y;
-			qDebug() << "Screen: " << allPoints[i].centerOfCrossOnScreen.x << allPoints[i].centerOfCrossOnScreen.y;
-			
-			// 
-			DataTuple dt(0, ed, EyeData(), fd);
-			tuples.push_back(CollectionTuple(dt));
-		}
 
-		QString error;
-		calibrated = gem.calibrate(tuples, GazeEstimationMethod::MONO_LEFT, error);
-		if (!calibrated)
-			qDebug() << error;
+		// GLints Only 
+		//Point2d eyeVec = allPoints[i].glintLeft_1 + allPoints[i].glintLeft_2 + allPoints[i].glintLeft_3;
+		//Point2d eyeVec = allPoints[i].glintRight_1 + allPoints[i].glintRight_2 + allPoints[i].glintRight_3;				// BEST RESULT SO FAR
 
+
+		// Pupil and Glint
+		Point2d eyeVec = calculateEyeVector(allPoints[i].pupilLeft, allPoints[i].glintLeft_1, allPoints[i].glintLeft_2, allPoints[i].glintLeft_3);
+		//Point2d eyeVec = calculateEyeVector(allPoints[i].pupilRight, allPoints[i].glintRight_1, allPoints[i].glintRight_2, allPoints[i].glintRight_3);
+		
+
+		EyeData ed;
+		ed.pupil.center.x = eyeVec.x;
+		ed.pupil.center.y = eyeVec.y;
+
+
+		FieldData fd;
+		fd.collectionMarker.center.x = allPoints[i].centerOfCrossOnScreen.x;
+		fd.collectionMarker.center.y = allPoints[i].centerOfCrossOnScreen.y;
+		qDebug() << "Screen: " << allPoints[i].centerOfCrossOnScreen.x << allPoints[i].centerOfCrossOnScreen.y;
+
+		// Add to structure
+		DataTuple dt(0, ed, EyeData(), fd);
+		tuples.push_back(CollectionTuple(dt));
+	}
+
+	QString error;
+	calibrated = gemLeft.calibrate(tuples, GazeEstimationMethod::MONO_LEFT, error);
+	if (!calibrated)
+		qDebug() << error;
+	
+	
 }
 
 
@@ -988,10 +955,10 @@ Point2f GoalkeeperAnalysis::estimate(Point2d original)
 		EyeData ed;
 		ed.pupil.center = original;
 		DataTuple dt(0, ed, EyeData(), FieldData());
-		 corrected = to2D(gem.estimateGaze(dt, GazeEstimationMethod::MONO_LEFT));
+		 corrected = to2D(gemLeft.estimateGaze(dt, GazeEstimationMethod::MONO_LEFT));
 		 qDebug() << "Gaze: " << corrected;
 		
-	//}
+//	}
 	return corrected;
 
 }
@@ -1001,23 +968,48 @@ void GoalkeeperAnalysis::showGaze()
 {
 	// read queue and show points on screen
 
-	Mat bg(screen_height, screen_width, CV_8UC3, cv::Scalar(255, 255, 255));
+	Mat bg(SCREEN_HEIGHT, SCREEN_WIDTH, CV_8UC3, cv::Scalar(255, 255, 255));
 
 	while (m_bIsCaptureRunning)
 	{
 		sharedMutex.lock();
 		if (!gazeQueue.empty())
 		{
+
+		
+			bg.setTo(cv::Scalar::all(0));
 			qDebug() << "Queue front.";
 			pupilGlintCombiInstance d = gazeQueue.front();
-
-			Point2d d2 = d.pupilRight;
-			qDebug() << "Point: " << d2.x << d2.y;
-			cv::circle(bg, estimate(d2), 5, Scalar(0,0,0));
+			gazeQueue.pop();
+			
+			/*
+			Point2d d2 = d.pupilLeft;
+			cv::drawMarker(bg, estimate(d2), cv::Scalar(0, 255, 0), MARKER_CROSS, 10, 2);              // 1     0,0	
+			qDebug() << "Pupil: " << d2.x << d2.y;
+			cv::circle(bg, d2, 5, Scalar(0, 0, 250));
+			cv::circle(bg, estimate(d2), 5, Scalar(0, 0, 0));
 
 			cv::imshow("Gaze", bg);
-			gazeQueue.pop();
+			waitKey(1);
+	
+	*/
 
+
+
+
+			Point2d eyeVec = calculateEyeVector(d.pupilLeft, d.glintLeft_1, d.glintLeft_2, d.glintLeft_3);
+			//Point2d eyeVec = calculateEyeVector(d.pupilRight, d.glintRight_1, d.glintRight_2, d.glintRight_3);
+			
+//			Point2d eyeVec = d.glintRight_1 + d.glintRight_2 + d.glintRight_3;
+
+			qDebug() << "EyeVec: " << eyeVec.x << eyeVec.y;
+			cv::circle(bg, eyeVec, 5, Scalar(0, 0, 250));
+			cv::circle(bg, estimate(eyeVec), 5, Scalar(0,0,0));
+
+			cv::drawMarker(bg, estimate(eyeVec), cv::Scalar(0, 255, 0), MARKER_CROSS, 10, 2);              // 1     0,0	
+			cv::imshow("Gaze", bg);
+			waitKey(1);
+			
 		}
 		else
 		{
@@ -1049,14 +1041,12 @@ void GoalkeeperAnalysis::captureFrame()
 	int frameNumber = 0;
 
 	outputfile << "Framenumber:" << frameNumber << ";";
-
+	//cam.setGain(gain);
+	//cam.setGamma(gamma);
 
 	while (m_bIsCaptureRunning)
 	{
 		
-		//cam.setGamma(gamma);
-		//cam.setGain(gain);
-
 		if (cam.getNextImage(&pBuffer, &nMemID))
 		{
 			cam.getCurrentFPS(&dblFPS);
@@ -1101,7 +1091,11 @@ void GoalkeeperAnalysis::captureFrame()
 							// 2. Save them in structure for calibration points
 								pupilGlintCombiInstance pgci = detectGlintAndPupil(frame1, frame2);
 							// add current found combination to current vector
-								tempFoundPoints.push_back(pgci);
+								if(pgci.valid)
+								{
+									tempFoundPoints.push_back(pgci);
+								}
+								
 							// testing
 								testDraw(pgci,&frame1);
 
@@ -1148,6 +1142,17 @@ void GoalkeeperAnalysis::captureFrame()
 		videoWriter.release();
 		qDebug() << "VideoWriter released";
 	}
+
+
+
+	if(outputfile.is_open())
+	{
+		outputfile << endl;
+		qDebug() << "Outputfile closed";
+
+	}
+	
+
 
 	qDebug() << "Thread for capturing Frames Ended.";
 	
@@ -1196,8 +1201,8 @@ void GoalkeeperAnalysis::saveVideoSmall(Mat frame1, Mat frame2)
 	{
 		
 		
-		brightestPointRegion tmp = getEyeRegionsByBrightestPoints(frame1, frame2);
-		vector<Rect> eyeRegions = tmp.regions;
+		vector<Rect> eyeRegions = getEyeRegionsByBrightestPoints(frame1, frame2);
+		
 		eyeRegions.reserve(2);
 		// 1. Get separate Regions of Frame for both eyes
 		if (!eyeRegions.empty())
@@ -1242,8 +1247,8 @@ void GoalkeeperAnalysis::saveVideoSmall(Mat frame1, Mat frame2)
 
 
 					sharedMutex.lock();
-					framesQueue.push(brightLeftEye);
-					framesQueue.push(darkLeftEye);
+						framesQueue.push(brightRightEye);
+						framesQueue.push(darkRightEye);
 					sharedMutex.unlock();
 
 					qDebug() << "Mat size: rows=" << brightLeftEye.rows << "Cols=" << brightLeftEye.cols;
@@ -1288,8 +1293,11 @@ FUNC: getEyeRegionsByBrightestPoints(Mat bright, Mat dark)
 	4. Depending of the x Value of the area building brightestPoint the regions are given back and the brightestPoints
 		are set globally for the detectGlints function. Because glints should all align with the brightest point (in the same eye).
 
+RETURN: vector of Rectangles. Element 0 left Region in Image and Element 1 is right Region in image
+	(if head movement is reduced usually 0 = right eye and 1 = left eye) 
+
 */
-GoalkeeperAnalysis::brightestPointRegion GoalkeeperAnalysis::getEyeRegionsByBrightestPoints(Mat bright, Mat dark)
+vector<Rect> GoalkeeperAnalysis::getEyeRegionsByBrightestPoints(Mat bright, Mat dark)
 {
 
 	boolean draw = false;
@@ -1304,8 +1312,6 @@ GoalkeeperAnalysis::brightestPointRegion GoalkeeperAnalysis::getEyeRegionsByBrig
 	// get differenceImage
 	cv::Mat differenceImage,differenceImage2;
 
-	// CHANGED FROM sensValue
-	// differenceImage = getDifferenceImage(&bright, &dark, sensValue,false);
 	differenceImage = getDifferenceImage(&bright, &dark, firstEyeThresh ,false);
 
 
@@ -1388,23 +1394,32 @@ GoalkeeperAnalysis::brightestPointRegion GoalkeeperAnalysis::getEyeRegionsByBrig
 			cv::waitKey(1);
 
 
-			// save rectangle for first eye
+			// save rectangle for second eye
 			eyeRoi2 = Rect(brightestPoint2.x - 50, brightestPoint2.y - 50, 100, 100);
 
 			if (eyeRoi2.x > 0 && eyeRoi2.y > 0 && eyeRoi2.width > 0 && eyeRoi2.height > 0)
 			{
 				eyeRegions.push_back(eyeRoi2);
+				// draw rectangle around
+				rectangle(bright, eyeRoi2, Scalar(0, 0, 0), 1, 8, 0);
 			}
 
-			// draw rectangle around
-			//rectangle(bright, eyeRoi2, Scalar(0, 0, 0), 1, 8, 0);
+			
 
 		}
 	}
 	
 
+
+
+// 4. Sort found regions
+
+	// if two regions where found
 	if(eyeRegions.size() >1)
 	{
+		// if roi1 is more left than roi2 switch order. Because right eye has smaller x than left eye.
+		// subscript 0 musst contain right eye (smaller x value)
+		// subscript 1 must contain left eye ( bigger x value)
 		if (eyeRoi1.x > eyeRoi2.x)
 		{
 			Rect tmp = eyeRegions[0];
@@ -1414,28 +1429,32 @@ GoalkeeperAnalysis::brightestPointRegion GoalkeeperAnalysis::getEyeRegionsByBrig
 	}
 	else
 	{
+		// only one region was found
 		if (eyeRegions.size() == 1)
 		{
 
 			// if only one eye is visible, check if on left or right side of image. 
-			// right side => left eye (because of movement)
-			// left side => right eye 
-			if (eyeRegions[0].x < apertureWidth/2)
+			// right half => left eye (becaused flipped)
+			// left half => right eye 
+			if (eyeRegions[0].x < APERTURE_WIDTH /2)
 			{
-				eyeRegions.push_back(eyeRegions[0]);
-				eyeRegions[0] = Rect(1, 1, 1, 1);
+				// found eye is right eye and at right spot in list
+				// add empty second rect
+				eyeRegions.push_back(Rect(0, 0, 0, 0));
+
+			}
+			else
+			{
+				// found eye with subscript 0 is left eye. move to subscrupt 1 and set 
+				// empty rect on subscript 0
+				Rect tmp = eyeRegions[0];
+				eyeRegions[0] = Rect(0, 0, 0, 0);
+				eyeRegions.push_back(tmp);
 			}
 		}
 	}
-	brightestPointRegion tmp;
-	tmp.regions = eyeRegions;
-	tmp.brightestPoints.emplace_back(brightestPoint);
-	tmp.brightestPoints.emplace_back(brightestPoint2);	
 
-	qDebug() << "1. getEyeRegionsByBrightestPoints: first" << brightestPoint.x << brightestPoint.y;
-	qDebug() << "1. getEyeRegionsByBrightestPoints: second" << brightestPoint2.x << brightestPoint2.y;
-
-	return tmp;
+	return eyeRegions;
 
 }
 
@@ -1561,31 +1580,31 @@ cv::Mat GoalkeeperAnalysis::getDifferenceImage(cv::Mat *frame1, cv::Mat *frame2,
 	return differenceImage;
 }
 
-std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::Mat darkFrame, Point2d brightestPoint)
+std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::Mat darkFrame, Point2d pBrightestPoint)
 {
-	boolean debug = true;
+
+	Point brightestPoint = pBrightestPoint;
 	vector<Point2d> glints;
 	boolean searchLeft = false;
 	byte glintCount = 1;
+
+	if (showDetection)
+	{
+		qDebug() << "Detecting.... ";
+		qDebug() << "Starting GLint: " << brightestPoint.x << brightestPoint.y;
+	}
+
 
 	//1. Get brightest Point in Eye Region
 	// get differenceImage
 	cv::Mat differenceImage2;
 	differenceImage2 = getDifferenceImage(&brightFrame, &darkFrame, glintLower, true);
-
-
-	imshow("Glints", differenceImage2);
-	cv::waitKey(1);
-
-	//blur(differenceImage2, differenceImage2, Size(5, 5));
-
-
-
-	if (debug) { qDebug() << "Glint 0 (brightest): " << brightestPoint.x << brightestPoint.y; }
+//	blur(differenceImage2, differenceImage2, Size(5, 5));
 
 	// brightest point found?
 	if (brightestPoint.x > 0 && brightestPoint.y > 0)
 	{
+
 		// add glint to vector and sort them!
 		glints.push_back(brightestPoint);
 
@@ -1593,11 +1612,11 @@ std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::M
 		Point2d glintRight1 = searchInSubArea(brightestPoint, differenceImage2, false);
 
 		// glint to the right found?
-		if (glintRight1.y > 0 && glintRight1.x > 0 && !isnan(glintRight1.x) && !isnan(glintRight1.y))
+		if (glintRight1.y > 0 && glintRight1.x > 0)
 		{
 			glintRight1.x = glintRight1.x + brightestPoint.x + 3;
-			glintRight1.y = glintRight1.y + brightestPoint.y - 2.5;	// 3
-			if (debug) { qDebug() << "Glint 1 (right)" << glintRight1.x << glintRight1.y; }
+			glintRight1.y = glintRight1.y + brightestPoint.y - 5;	// 3
+			if (showDetection) { qDebug() << "r1:" << glintRight1.x << glintRight1.y; }
 			glints.push_back(glintRight1);
 			++glintCount;
 
@@ -1606,11 +1625,11 @@ std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::M
 			Point2d glintRight2 = searchInSubArea(glintRight1, differenceImage2, false);
 
 			// glint to the right found?
-			if (glintRight2.x > 0 && glintRight2.y > 0 && !isnan(glintRight2.x) && !isnan(glintRight2.y))
+			if (glintRight2.x > 0 && glintRight2.y > 0)
 			{
-				glintRight2.x = glintRight1.x + glintRight1.x + 3;
-				glintRight2.y = glintRight1.y + glintRight1.y - 2.5; // 3
-				if (debug) { qDebug() << "Glint 2 (right):" << glintRight2.x << glintRight2.y; }
+				glintRight2.x = glintRight2.x + glintRight1.x + 3;
+				glintRight2.y = glintRight2.y + glintRight1.y - 5; // 3
+				if (showDetection) { qDebug() << "r2:" << glintRight2.x << glintRight2.y; }
 				glints.push_back(glintRight2);
 				searchLeft = false;
 				++glintCount;
@@ -1618,14 +1637,14 @@ std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::M
 			}
 			else
 			{
-				//if (debug) { qDebug() << "BAD Glint 3 (right):" << glintRight2.x << glintRight2.y; }
+				if (showDetection){ qDebug() << "r2 not usable!" ;}
 
 				searchLeft = true;
 			}
 		}
 		else
 		{
-			//if (debug) { qDebug() << " BAD Glint 2 (right):" << glintRight1.x << glintRight1.y; }
+			if (showDetection) { qDebug() << "r1 not usable!" ; }
 			searchLeft = true;
 		}
 
@@ -1636,11 +1655,11 @@ std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::M
 			Point2d glintLeft1 = searchInSubArea(brightestPoint, differenceImage2, true);
 
 			// glint to the right found?
-			if (glintLeft1.y > 0 && glintLeft1.x > 0 && !isnan(glintLeft1.x) && !isnan(glintLeft1.y))
+			if (glintLeft1.y > 0 && glintLeft1.x > 0)
 			{
 				glintLeft1.x = glintLeft1.x + brightestPoint.x - 14;
-				glintLeft1.y = glintLeft1.y + brightestPoint.y - 2.5;
-				if (debug) { qDebug() << "Glint 2 (left):" << glintLeft1.x << glintLeft1.y; }
+				glintLeft1.y = glintLeft1.y + brightestPoint.y - 5;
+				if (showDetection) { qDebug() << "l1:" << glintLeft1.x << glintLeft1.y; }
 				glints.push_back(glintLeft1);
 				++glintCount;
 
@@ -1650,51 +1669,52 @@ std::vector<Point2d> GoalkeeperAnalysis::detectGlints(cv::Mat brightFrame, cv::M
 				Point2d glintLeft2 = searchInSubArea(glintLeft1, differenceImage2, true);
 
 				// glint to the right found?
-				if (glintLeft2.x > 0 && glintLeft2.y > 0 && glintCount < 3 && !isnan(glintLeft2.x) && !isnan(glintLeft2.y))
+				if (glintLeft2.x > 0 && glintLeft2.y > 0 && glintCount < 3)
 				{
 					glintLeft2.x = glintLeft2.x + glintLeft1.x - 14;
-					glintLeft2.y = glintLeft2.y + glintLeft1.y - 2.5;
-					if (debug) { qDebug() << "Glint 3 (left):" << glintLeft2.x << glintLeft2.y; }
+					glintLeft2.y = glintLeft2.y + glintLeft1.y - 5;
+					if (showDetection) { qDebug() << "l2:" << glintLeft2.x << glintLeft2.y; }
 					glints.push_back(glintLeft2);
 				}
 				else
 				{
-					//if (debug) { qDebug() << "BAD Glint 3 (left):" << glintLeft2.x << glintLeft2.y; }
+					if (showDetection) { qDebug() << "l2 not usable!"; }
 
 				}
 			}
 			else
 			{
-				//if (debug) { qDebug() << "BAD Glint 2 (right):" << glintLeft1.x << glintLeft1.y; }
+				if (showDetection) { qDebug() << "l1 not usable!"; }
 
 			}
 		}
 
+		if(showDetection)
+			qDebug() << "END--------------------------------------------------" << endl;
 	}
 	else
 	{
-		if (debug) { qDebug() << "Could not find a brightest Point. Please check Sensitivity Value for Thresholdimage."; }
+		if (showDetection) { qDebug() << "Could not find a brightest Point. Please check Sensitivity Value for Thresholdimage."; }
 	}
 
-//	if (drawGlints)
-	//{
+	if (drawDetection)
+	{
 		for (int i = 0; i < glints.size(); i++)
 		{
-			
 			if (i == 0)
 			{
-				circle(brightFrame, glints[i], 2, Scalar(255, 255, 255), 1, 8, 0);
-				cv::drawMarker(brightFrame, glints[i], cv::Scalar(0, 0, 0), MARKER_CROSS, 5, 1);              // 1     0,0
+				circle(brightFrame, glints[i], 2, Scalar(0, 255, 0), 1, 8, 0);
+				cv::drawMarker(brightFrame, glints[i], cv::Scalar(0, 255, 0), MARKER_CROSS, 5, 1);              // 1     0,0
 			}
 			else
 			{
-				circle(brightFrame, glints[i], 2, Scalar(255, 255, 255), 1, 8, 0);
-				cv::drawMarker(brightFrame, glints[i], cv::Scalar(255, 255, 255), MARKER_CROSS, 5, 1);              // 1     0,0
+				circle(brightFrame, glints[i], 2, Scalar(0, 0, 255), 1, 8, 0);
+				cv::drawMarker(brightFrame, glints[i], cv::Scalar(0, 0, 255), MARKER_CROSS, 5, 1);              // 1     0,0
 
 			}
 
 		}
-	//}
+	}
 
 	return glints;
 
@@ -1736,215 +1756,11 @@ void glintFaltung(Mat brightFrame)
 	return 	glints;
 }*/
 
-// Function for detecting glints
-std::vector<Point2d> GoalkeeperAnalysis::detectGlints_orig(cv::Mat brightFrame, cv::Mat darkFrame)
-{
-	boolean debug = true;
-	vector<Point2d> glints;
-	boolean searchLeft = false;
-	byte glintCount = 1;
-
-//1. Get brightest Point in Eye Region
-	// get differenceImage
-	cv::Mat differenceImage2;
-	differenceImage2 = getDifferenceImage(&brightFrame, &darkFrame, glintLower,true);
-	blur(differenceImage2, differenceImage2, Size(5, 5));
-	
-	// get brightestPoint from differenceImage
-	Point brightestPoint;
-	double min, max;
-	cv::Point min_loc;
-	cv::minMaxLoc(differenceImage2, &min, &max, &min_loc, &brightestPoint);
-
-	if (debug) { qDebug() << "       2. detectGlints: brightestPoint" << brightestPoint.x << brightestPoint.y; }
-		
-	// brightest point found?
-	if (brightestPoint.x > 0 && brightestPoint.y > 0)
-	{
-		// add glint to vector and sort them!
-		glints.push_back(brightestPoint);
-
-		// 2. search glint to the right
-		Point2d glintRight1 = searchInSubArea(brightestPoint, differenceImage2, false);
-
-		// glint to the right found?
-		if (glintRight1.y > 0 && glintRight1.x > 0)
-		{
-			glintRight1.x = glintRight1.x + brightestPoint.x + 3;
-			glintRight1.y = glintRight1.y + brightestPoint.y - 5;	// 3
-			if (debug) { qDebug() << "GL: r1 EYE:" << glintRight1.x << glintRight1.y; }
-			glints.push_back(glintRight1);
-			++glintCount;
-
-
-			// 3. search glint to the right
-			Point2d glintRight2 = searchInSubArea(glintRight1, differenceImage2, false);
-
-			// glint to the right found?
-			if (glintRight2.x > 0 && glintRight2.y > 0)
-			{
-				glintRight2.x = glintRight1.x + glintRight1.x + 3;
-				glintRight2.y = glintRight1.y + glintRight1.y - 5; // 3
-				if (debug) { qDebug() << "GL: r2:" << glintRight2.x << glintRight2.y; }
-				glints.push_back(glintRight2);
-				searchLeft = false;
-				++glintCount;
-
-			}
-			else
-			{
-				if (debug){ qDebug() << "GL: r2:" << glintRight2.x << glintRight2.y;}
-
-				searchLeft = true;
-			}
-		}
-		else
-		{
-			if (debug) { qDebug() << "GL: r1:" << glintRight1.x << glintRight1.y; }
-			searchLeft = true;
-		}
-
-		// searching glint to the left
-		if (searchLeft)
-		{
-			// 2. search glint to the right
-			Point2d glintLeft1 = searchInSubArea(brightestPoint, differenceImage2, true);
-
-			// glint to the right found?
-			if (glintLeft1.y > 0 && glintLeft1.x > 0)
-			{
-				glintLeft1.x = glintLeft1.x + brightestPoint.x - 14;
-				glintLeft1.y = glintLeft1.y + brightestPoint.y - 5;
-				if (debug) { qDebug() << "GL: l1:" << glintLeft1.x << glintLeft1.y; }
-				glints.push_back(glintLeft1);
-				++glintCount;
-
-
-
-				// 3. search glint to the right
-				Point2d glintLeft2 = searchInSubArea(glintLeft1, differenceImage2, true);
-
-				// glint to the right found?
-				if (glintLeft2.x > 0  && glintLeft2.y > 0 && glintCount < 3)
-				{
-					glintLeft2.x = glintLeft2.x + glintLeft1.x - 14;
-					glintLeft2.y = glintLeft2.y + glintLeft1.y - 5;
-					if (debug) { qDebug() << "GL: l2:" << glintLeft2.x << glintLeft2.y; }
-					glints.push_back(glintLeft2);
-				}
-				else
-				{
-					if (debug) { qDebug() << "GL: l2:" << glintLeft2.x << glintLeft2.y; }
-
-				}
-			}
-			else
-			{
-				if (debug) { qDebug() << "GL: l1:" << glintLeft1.x << glintLeft1.y; }
-
-			}
-		}
-
-	}
-	else
-	{
-		if (debug) { qDebug() << "Could not find a brightest Point. Please check Sensitivity Value for Thresholdimage."; }
-	}
-
-	if (drawGlints)
-	{
-		for (int i = 0; i < glints.size(); i++)
-		{
-			if (i == 0)
-			{
-				circle(brightFrame, glints[i], 2, Scalar(0, 0, 255), 1, 8, 0);
-				cv::drawMarker(brightFrame, glints[i], cv::Scalar(0, 0, 255), MARKER_CROSS, 5, 1);              // 1     0,0
-			}
-			else
-			{
-				circle(brightFrame, glints[i], 2, Scalar(255, 255, 255), 1, 8, 0);
-				cv::drawMarker(brightFrame, glints[i], cv::Scalar(255, 255, 255), MARKER_CROSS, 5, 1);              // 1     0,0
-
-			}
-			
-		}
-	}
-
-	return glints;
-
-	
-}
-
-// UNDER CONSTRUCTION: evtl. optimizing
-std::vector<Point2d> GoalkeeperAnalysis::detectGlintsOpt(cv::Mat brightFrame, cv::Mat darkFrame)
-{
-
-
-
-	vector<Point2d> glints;
-	boolean searchLeft = false;
-	byte glintCount = 1;
-
-//1. get differenceImage
-	cv::Mat differenceImage;
-	differenceImage = getDifferenceImage(&brightFrame, &darkFrame,10,true);
-	blur(differenceImage, differenceImage, Size(5, 5));
-
-// 2. get brightestPoint
-	Point brightestPoint;
-	double min, max;
-	cv::Point min_loc;
-	cv::minMaxLoc(differenceImage, &min, &max, &min_loc, &brightestPoint);
-
-
-// 3. new AOI
-	//Rect aoiRect = Rect(brightestPoint.x-20, brightestPoint.y-5, 40, 10);
-	byte fact = 30;
-	//rectangle(brightFrame, aoiRect, Scalar(255, 255, 255), 1, 8, 0);
-
-	cv::cvtColor(brightFrame, brightFrame, CV_BGR2GRAY);
-	for (int i = 0; i < (fact / 2) - 1; i++)
-	{
-		Rect aoiRect = Rect(brightestPoint.x - (fact - (i * 8)), brightestPoint.y - 3, 8, 6);
-		if(aoiRect.x > 0 && aoiRect.y > 0)
-		{
-			Mat roi = brightFrame(aoiRect);
-			cv::minMaxLoc(roi, &min, &max, &min_loc, &brightestPoint);
-			Scalar s = mean(roi);
-			double mean = s.val[0];
-
-			//if (max > mean)
-		//	{
-				//rectangle(brightFrame, aoiRect, Scalar(255, 255, 255), 1, 8, 0);
-			//}
-		}
-
-	}
-
-		
-	//Mat aoi = brightFrame();
-	//reduce(InputArray src, OutputArray dst, 0, int rtype, int dtype = -1);
-
-
-	return glints;
-
-
-}
-
 Point2d GoalkeeperAnalysis::searchInSubArea(Point2d fatherPoint, Mat fatherArea, boolean left)
 {
 	boolean debug = true;
 	Rect cut;
 	Point2d glint = Point2d(0, 0);
-
-	
-	if(fatherArea.channels() == 3)
-	{
-		cvtColor(fatherArea, fatherArea, CV_BGR2GRAY);
-		
-	 }
-
-	//fatherArea = fatherArea.reshape(1, 0);
 
 	// if new searcharea is left from starting point get new rectangle with:
 	// -3 pixel left from starting point
@@ -1968,8 +1784,6 @@ Point2d GoalkeeperAnalysis::searchInSubArea(Point2d fatherPoint, Mat fatherArea,
 
 	}
 	
-	// draw rectangle of searcharea
-	//cv::rectangle(fatherArea, cut, Scalar(255,255,255),1,8,0);
 	
 	if(0 <= cut.x && 0 <= cut.width && cut.x + cut.width <= fatherArea.cols && 0 <= cut.y && 0 <= cut.height && cut.y + cut.height <= fatherArea.rows)
 	{
@@ -1987,29 +1801,20 @@ Point2d GoalkeeperAnalysis::searchInSubArea(Point2d fatherPoint, Mat fatherArea,
 
 			if (glint.x == 0 && glint.y == 0)
 			{
-				//qDebug() << "END --------------------------";
 				return Point2d(0, 0);
 			}
 			else
 			{
-
-				//qDebug() << "END --------------------------";
-			
 				return glint;
-
-
 			}
 	
 		}
-		else
-		{
-			return Point2d(0, 0);
-
-		}
 		
-	}
 
-	
+			
+	}
+	return Point2d(0, 0);
+
 
 }
 
@@ -2025,23 +1830,11 @@ Point2d GoalkeeperAnalysis::getBrightestPoint(Mat frame)
 	cv::Point min_loc, max_loc;
 	cv::minMaxLoc(frame, &min, &max, &min_loc, &max_loc);
 
+	//qDebug() << "    Min Brightness is:" << min;
+	//qDebug() << "    Max Brightness is:" << max;
+	//qDebug() << "    Max - Min  Brightness is:" << max - min;
 
-	// in grayscale image a glint has to have at least an intensity value of 200.
-	// usually it is 255 because the glint is totally white, but 
-	// in some cases because of head orientation there can be some artifacts.
-	// max Value of 200 is safe enough
-	//if ((max - min) > 200 )
-	//if(max > 200 && min < 20)
-	//{
-		//qDebug() << "    Min Brightness is:" << min;
-		//qDebug() << "    Max Brightness is:" << max;	
-		//qDebug() << "    Max - Min  Brightness is:" << max-min;
 		return max_loc;
-	//}
-	//else
-//	{
-	//	return Point2d(0, 0);
-	//}
 
 }
 
@@ -2049,36 +1842,47 @@ GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::detectGlintAndPu
 {
 
 	// save margins from cutted out regions in these variables
-	int leftEyeMarginLeft, leftEyeMarginTop, rightEyeMarginLeft, rightEyeMarginTop;
 	Mat brightRightEye, brightLeftEye;
 	Mat darkRightEye, darkLeftEye;
+	Rect rightEyeRect, leftEyeRect;
+
+
+	// Eye Image scaled
+	Point2d brightestPointRight_onEyeScale = Point2d(rightEyeRect.x + 50, rightEyeRect.y + 50);
+	Point2d brightestPointLeft_onEyeScale = Point2d(leftEyeRect.x + 50, leftEyeRect.y + 50);
+	vector<Point2d> glintsLeft, glintsRight;
 	Point2d pupilCenterLeft = Point(0, 0);
 	Point2d pupilCenterRight = Point(0, 0);
+
+	// Full image scaled
 	Point2d brightestPointRight, brightestPointLeft;
+	Point2d pupilCenterLeft_wholeScale, pupilCenterRight_wholeScale;
+	vector<Point2d> glintsLeft_fullScale, glintsRight_fullScale;
+
+
 	pupilGlintCombiInstance curPositions;
-	vector<Point2d> glintsLeft, glintsRight;
 
 
 
 
 //0. detect bright/dark frame
 //////////////////////////////////////////////////////////////////////////////////////////////
-	Scalar frame1Mean = mean(frame1);
-	Scalar  frame2Mean = mean(frame2);
-	Mat bright;
-	Mat dark;
+Scalar frame1Mean = mean(frame1);
+Scalar  frame2Mean = mean(frame2);
+Mat bright;
+Mat dark;
 
-	if (frame1Mean.val[0] > frame2Mean.val[0])
-	{
-		bright = frame1;
-		dark = frame2;
-	}
-	else
-	{
-		bright = frame2;
-		dark = frame1;
-	}
-	
+if (frame1Mean.val[0] > frame2Mean.val[0])
+{
+	bright = frame1;
+	dark = frame2;
+}
+else
+{
+	bright = frame2;
+	dark = frame1;
+}
+
 
 
 // 1.HAAR: Detect Eyes and split image 
@@ -2091,7 +1895,7 @@ GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::detectGlintAndPu
 		// 1. Get separate Regions of Frame for both eyes
 		if (!tmpEyes.empty())
 		{
-			
+
 
 			 brightRightEye = bright(tmpEyes[0]);
 			 brightLeftEye = bright(tmpEyes[1]);
@@ -2115,83 +1919,44 @@ GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::detectGlintAndPu
 	}
 	*/
 
-	
-// 1.a Detect Eyes by brightest Point
-//////////////////////////////////////////////////////////////////////////////////////////////
-	
-	if (!bright.empty() && !dark.empty())
+
+	// 1.a Detect Eyes by brightest Point
+	//////////////////////////////////////////////////////////////////////////////////////////////
+
+if (!bright.empty() && !dark.empty())
+{
+
+	vector<Rect> eyeRegions = getEyeRegionsByBrightestPoints(bright, dark);
+	eyeRegions.reserve(2);
+
+
+	// 1. Get separate Regions of Frame for both eyes
+	if (!eyeRegions.empty())
 	{
-
-		brightestPointRegion tmp = getEyeRegionsByBrightestPoints(bright, dark);
-		vector<Rect> eyeRegions = tmp.regions;
-		
-		if(tmp.brightestPoints[0].x > tmp.brightestPoints[1].x)
-		{
-			brightestPointLeft = tmp.brightestPoints[0];
-			brightestPointRight = tmp.brightestPoints[1];
-			
-		}
-		else
-		{
-			
-			brightestPointLeft = tmp.brightestPoints[1];
-			brightestPointRight = tmp.brightestPoints[0];
-		}
-		
-			
-		eyeRegions.reserve(2);
-
-
-		// 1. Get separate Regions of Frame for both eyes
-		if (!eyeRegions.empty())
+		if (eyeRegions.size() == 2)
 		{
 
-			if (eyeRegions.size() > 0)
+			if ((0 <= eyeRegions[0].x && 0 <= eyeRegions[0].width && eyeRegions[0].x + eyeRegions[0].width <= bright.cols && 0 <= eyeRegions[0].y && 0 <= eyeRegions[0].height && eyeRegions[0].y + eyeRegions[0].height <= bright.rows))
 			{
-				if ((0 <= eyeRegions[0].x && 0 <= eyeRegions[0].width && eyeRegions[0].x + eyeRegions[0].width <= bright.cols && 0 <= eyeRegions[0].y && 0 <= eyeRegions[0].height && eyeRegions[0].y + eyeRegions[0].height <= bright.rows))
-				{
+				brightRightEye = bright(eyeRegions[0]);
+				darkRightEye = dark(eyeRegions[0]);
 
-
-					brightRightEye = bright(eyeRegions[0]);
-					darkRightEye = dark(eyeRegions[0]);
-
-					// 2. Save margin values of cutted out regions for later back calculating the position in the whole image
-					// original postition of point in region is at x: leftEyeMarginTop + distance x in region itself
-					//											   y: leftEyeMarginleft + distance y in region itself
-					//											   x: rightEyeMarginTop + distance x in region itself
-					//											   y: rightEyeMarginleft + distance y in region itself
-
-
-
-					rightEyeMarginLeft = eyeRegions[0].x;
-					rightEyeMarginTop = eyeRegions[0].y;
-				}
 			}
 
-			if (eyeRegions.size() > 1)
+			if ((0 <= eyeRegions[1].x && 0 <= eyeRegions[1].width && eyeRegions[1].x + eyeRegions[1].width <= bright.cols && 0 <= eyeRegions[1].y && 0 <= eyeRegions[1].height && eyeRegions[1].y + eyeRegions[1].height <= bright.rows))
 			{
 
-				if ((0 <= eyeRegions[1].x && 0 <= eyeRegions[1].width && eyeRegions[1].x + eyeRegions[1].width <= bright.cols && 0 <= eyeRegions[1].y && 0 <= eyeRegions[1].height && eyeRegions[1].y + eyeRegions[1].height <= bright.rows))
-				{
-			
-					brightLeftEye = bright(eyeRegions[1]);
-					darkLeftEye = dark(eyeRegions[1]);
+				brightLeftEye = bright(eyeRegions[1]);
+				darkLeftEye = dark(eyeRegions[1]);
 
-					// 2. Save margin values of cutted out regions for later back calculating the position in the whole image
-					// original postition of point in region is at x: leftEyeMarginTop + distance x in region itself
-					//											   y: leftEyeMarginleft + distance y in region itself
-					//											   x: rightEyeMarginTop + distance x in region itself
-					//											   y: rightEyeMarginleft + distance y in region itself
-
-					leftEyeMarginLeft = eyeRegions[1].x;
-					leftEyeMarginTop = eyeRegions[1].y;
-
-				}
 			}
-		}
-	}	
-	
+			rightEyeRect = eyeRegions[0];
+			leftEyeRect = eyeRegions[1];
 
+		}
+	}
+
+}
 
 
 // 2.  Glint Detection
@@ -2199,166 +1964,88 @@ GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::detectGlintAndPu
 	
 	if (!brightRightEye.empty() && !darkRightEye.empty())
 	{
-		//glintsRight = detectGlints(brightRightEye, darkRightEye, brightestPointRight);
-		glintsRight = detectGlints_orig(brightRightEye, darkRightEye);
+		glintsRight = detectGlints(brightRightEye, darkRightEye, brightestPointRight_onEyeScale);
+		
+		
 
+		// Recalculate back to whole image
+		for (int i = 0; i < glintsLeft.size(); i++)
+		{
+			if (glintsRight[i].x > 0 && glintsRight[i].y >0)
+			{
+				glintsRight[i] = Point2d(glintsRight[i].x + rightEyeRect.x, glintsRight[i].y + rightEyeRect.y);
+			}
+			else
+			{
+				glintsRight.erase(glintsRight.begin() + i);
+			}
+		}
 	}
 	
 	
 	if (!brightLeftEye.empty() && !darkLeftEye.empty())
 	{
-
-		//glintsLeft = detectGlints(brightLeftEye, darkLeftEye, brightestPointLeft);
-		glintsLeft = detectGlints_orig(brightLeftEye, darkLeftEye);
+		glintsLeft = detectGlints(brightLeftEye, darkLeftEye, brightestPointLeft_onEyeScale);	
+		// Recalculate back to whole image
+		for (int i = 0; i < glintsLeft.size(); i++)
+		{
+			if (glintsLeft[i].x > 0 && glintsLeft[i].y >0)
+			{
+				glintsLeft[i] = Point2d(glintsLeft[i].x + leftEyeRect.x, glintsLeft[i].y + leftEyeRect.y);
+			}
+			else
+			{
+				glintsLeft.erase(glintsLeft.begin()+i);
+			}
+		}
+		
 	}	
 	
-
-	// CURRENT TEST
-	//equalizeGlints(&brightRightEye, glintsRight);
-	//equalizeGlints(&brightLeftEye, glintsLeft);
-	
-	
-//  3. Pupil detection for both eyes
-//////////////////////////////////////////////////////////////////////////////////////////////
-
-// 3. a Simple Blob Detection
-	/*
-	if (!brightRightEye.empty())
-	{
-		pupilCenterLeft = detectPupil_SimpleBlobDetector(brightLeftEye);
-		circle(brightLeftEye, pupilCenterLeft, 5, Scalar(255, 255, 255), 1, 8, 0);
-	}
-
-	if (!brightRightEye.empty())
-	{
-		pupilCenterRight = detectPupil_SimpleBlobDetector(brightRightEye);
-		circle(brightRightEye, pupilCenterLeft, 5, Scalar(255, 255, 255), 1, 8, 0);
-	}
-	*/
 	
 // 3. b Else
-	
 	if (!darkRightEye.empty())
 	{
 		RotatedRect pupilRight = detectPupilELSE(brightRightEye, darkLeftEye);
-		pupilCenterRight = pupilRight.center;
-		//qDebug() << "detectGlintAndPupil: Pupil right: " << pupilCenterRight.x << pupilCenterRight.y;
+		
+
+		if (pupilRight.center.x > 0 && pupilRight.center.y > 0)
+		{
+			pupilCenterRight_wholeScale = Point2d(rightEyeRect.x + pupilRight.center.x, rightEyeRect.y + pupilRight.center.y);
+		}
+		else
+		{
+			pupilCenterRight_wholeScale = Point2d(0, 0);
+		}
+		qDebug() << "Pupil right: " << pupilRight.center.x << pupilRight.center.y;
+		qDebug() << "Full Pupil right: " << pupilCenterRight_wholeScale.x << pupilCenterRight_wholeScale.y;
+
+
 
 	}
 
 	if (!darkLeftEye.empty() )
 	{
 		RotatedRect pupilLeft = detectPupilELSE(brightLeftEye,darkLeftEye);
-		pupilCenterLeft = pupilLeft.center;
-		//qDebug() << "detectGlintAndPupil: Pupil left: " << pupilCenterLeft.x << pupilCenterLeft.y;
+		 
+		if(pupilLeft.center.x > 0 && pupilLeft.center.y > 0)
+		{
+			pupilCenterLeft_wholeScale = Point2d(leftEyeRect.x + pupilLeft.center.x, leftEyeRect.y + pupilLeft.center.y);
+		}
+		else
+		{
+			pupilCenterLeft_wholeScale =Point2d(0,0);
+		}
+
+		qDebug() << "Pupil left: " << pupilLeft.center.x << pupilLeft.center.y;
+		qDebug() << "Full Pupil left: " << pupilCenterLeft_wholeScale.x << pupilCenterLeft_wholeScale.y;
+
 
 	}
 	
-	
-	
 
-// 3. c TIBA
-	/*
-	
-	if (!darkLeftEye.empty())
-	{
-
-		Point2d p = TIBA::run(darkLeftEye);
-		qDebug() << "=========================================================================";
-		qDebug() << p.x << p.y;
-		circle(darkLeftEye, p, 2, Scalar(0 ,0, 255), 1, 8, 0);
-	}
-	
-	*/
-
-
-// 3. d Morph & Contour
-/*
-	if(!brightRightEye.empty())
-	{
-		
-		
-		// THIAGOS fitEllipse
-		Manual manualFitEllipse = Manual::Manual();
-
-		if(brightRightEye.channels() < 3)
-			cvtColor(brightRightEye, brightRightEye,CV_GRAY2BGR);
-
-		RotatedRect asdf = manualFitEllipse.run(brightRightEye);
-
-		if (brightRightEye.channels() == 3)
-			cvtColor(brightRightEye, brightRightEye, CV_BGR2GRAY);
-
-		ellipse(brightRightEye,asdf,Scalar(0,255,0), 1, 8);
-
-
-		
-
-	}	*/
-
-// 4. Fit Ellipse on Edges
-	/*
-	if (!darkRightEye.empty())
-	{
-		RotatedRect rightEllipse = fitEllipse_BHO(darkRightEye);
-		cv::ellipse(darkRightEye, rightEllipse.center, rightEllipse.size*0.5f, rightEllipse.angle, 0, 360, Scalar(0, 255, 0), 1, LINE_AA);
-	}
-	*/
-
-	/*
-	if (!darkLeftEye.empty())
-	{
-		RotatedRect leftEllipse = fitEllipse_BHO(darkLeftEye);
-		cv::ellipse(darkLeftEye, leftEllipse.center, leftEllipse.size*0.5f, leftEllipse.angle, 0, 360, Scalar(0, 255, 0), 1, LINE_AA);
-	}
-	*/
-
-
-// 5. d Morph & Contour
-	/*
-	if (!brightRightEye.empty())
-	{
-			if (glintsRight.size() > 0)
-			{
-				Rect pupilAreaRight = Rect(glintsRight[0].x - 15, glintsRight[0].y - 15, 30, 30);
-				rectangle(brightRightEye, pupilAreaRight, Scalar(0, 255, 0), 1, 8, 0);
-
-				if (0 <= pupilAreaRight.x && 0 <= pupilAreaRight.width && pupilAreaRight.x + pupilAreaRight.width <= brightRightEye.cols && 0 <= pupilAreaRight.y && 0 <= pupilAreaRight.height && pupilAreaRight.y + pupilAreaRight.height <= brightRightEye.rows)
-				{
-					Mat tmp = brightRightEye(pupilAreaRight);
-					pupilCenterRight = getPupil(tmp);
-					pupilCenterRight.x += pupilAreaRight.x;
-					pupilCenterRight.y += pupilAreaRight.y;
-					circle(brightRightEye, pupilCenterRight, 2, Scalar(0, 255, 0), 1, 8, 0);
-				}
-
-			}
-			else
-			{
-				pupilCenterRight = getPupil(brightRightEye);
-				qDebug() << "Darkest point: " << pupilCenterRight.x << pupilCenterRight.y;
-				circle(brightRightEye, pupilCenterRight, 2, Scalar(0, 255, 0), 1, 8, 0);
-
-			}
-
-	}*/
-
-
-	if (true)
-	{
-	
-		circle(bright, brightestPointRight, 2, Scalar(0, 0, 255), 1, 8, 0);
-		cv::drawMarker(bright, brightestPointRight, cv::Scalar(0, 0, 255), MARKER_CROSS, 5, 1);              // 1     0,0
-		qDebug() << " 3. detectGlintAndPupil: brightestPointRight" << brightestPointRight.x << brightestPointRight.y;
-
-		circle(bright, brightestPointLeft, 2, Scalar(0, 255, 0), 1, 8, 0);
-		cv::drawMarker(bright, brightestPointLeft, cv::Scalar(0, 255, 0), MARKER_CROSS, 5, 1);              // 1     0,0
-		qDebug() << " 3. detectGlintAndPupil: brightestPointleft" << brightestPointLeft.x << brightestPointLeft.y;
-	}
 
 	if (!brightLeftEye.empty())
 	{
-		//imshow("LeftEye", darkLeftEye);
 		imshow("LeftEye", brightLeftEye);
 
 	}
@@ -2366,13 +2053,12 @@ GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::detectGlintAndPu
 
 	if (!brightRightEye.empty())
 	{
-		//imshow("RightEye", darkRightEye);
 		imshow("RightEye", brightRightEye);
 	}
 
 	// calculate and organize all glints and pupilcenters 
-		//curPositions = calcPupilGlintCombi(glintsLeft, glintsRight, leftEyeMarginLeft, leftEyeMarginTop, rightEyeMarginLeft, rightEyeMarginTop);
-
+		curPositions = calcPupilGlintCombi(pupilCenterRight_wholeScale, pupilCenterLeft_wholeScale,glintsLeft, glintsRight, leftEyeRect.x, leftEyeRect.y, rightEyeRect.x, rightEyeRect.y);
+		
 	return curPositions;
 }
 
@@ -2436,7 +2122,7 @@ RotatedRect GoalkeeperAnalysis::fitEllipse_BHO(Mat img)
 		Mat pointsf;
 		Mat(contours[i]).convertTo(pointsf, CV_32F);
 		RotatedRect box = fitEllipse(pointsf);
-		if (box.size.width > minboxW && box.size.width < maxboxW && box.size.height > minboxH && box.size.height < maxboxH)
+		if (box.size.width > minboxW && box.size.width < maxboxW && box.size.height)
 		{
 			if (box.size.width < biggestBox.size.width)
 			{
@@ -2545,38 +2231,53 @@ Point GoalkeeperAnalysis::getPupil(Mat src)
 	//return Point(0,0);
 }
 
-GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::calcPupilGlintCombi(vector<Point2d> glintsLeft, vector<Point2d> glintsRight, int leftEyeMarginLeft, int leftEyeMarginTop, int rightEyeMarginLeft, int rightEyeMarginTop)
+GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::calcPupilGlintCombi(Point2d pupilCenterRight, Point2d pupilCenterLeft, vector<Point2d> glintsLeft, vector<Point2d> glintsRight, int leftEyeRectX, int leftEyeRectY, int rightEyeRectX, int rightEyeRectY)
 {
 
 	//3.  COMPUTING Glints and Combination => EyeVec
 	//////////////////////////////////////////////////////////////////////////////////////////////
 	// calculate according to old pupil position which glints are visible and save all in 
 	// structure curPositions (pupilGlintCombiInstance)
-	boolean debug = false;
-	Point2d pupilCenterLeft = Point(0, 0);
-	Point2d pupilCenterRight = Point(0, 0);
+	boolean debug = true;
+	boolean isValid = true;
+	boolean isValid2 = true;
+
 	pupilGlintCombiInstance curPositions;
 
 
-// Recalculate back to whole image
-	for (int i = 0; i < glintsLeft.size(); i++)
+// 1. Is pupil detected?
+	if (pupilCenterRight.x <= 0 && pupilCenterRight.y <= 0)
 	{
-		glintsLeft[i].x += leftEyeMarginLeft;
-		glintsLeft[i].y += leftEyeMarginTop;
+		isValid2 = false;
+	}
+	
+
+	if (pupilCenterLeft.x <= 0 && pupilCenterLeft.y <= 0)
+	{
+		isValid2 = false;
 	}
 
-	for (int i = 0; i < glintsRight.size(); i++)
+
+
+// 2. Is rectangle greate than 0? => detected
+	if (rightEyeRectX <= 0 && rightEyeRectY <= 0)
 	{
-		glintsRight[i].x += rightEyeMarginLeft;
-		glintsRight[i].y += rightEyeMarginTop;
+		isValid2 = false;
 	}
 
-	pupilCenterLeft.x += leftEyeMarginLeft;
-	pupilCenterLeft.y += leftEyeMarginTop;
+	if (leftEyeRectX <= 0 && leftEyeRectY <= 0)
+	{
+		isValid2 = false;
+	}
 
-	pupilCenterRight.x += rightEyeMarginLeft;
-	pupilCenterRight.y += rightEyeMarginTop;
 
+
+
+
+
+// 4. Sort glints
+	sort(glintsLeft.begin(), glintsLeft.end(), mySort);
+	sort(glintsRight.begin(), glintsRight.end(), mySort);
 
 
 // Calculate glint positions according to old position
@@ -2681,53 +2382,137 @@ GoalkeeperAnalysis::pupilGlintCombiInstance GoalkeeperAnalysis::calcPupilGlintCo
 	curPositions.pupilLeft = pupilCenterLeft;
 	curPositions.pupilRight = pupilCenterRight;
 
-	outputfile << endl;
-
 	oldPupilCenterLeft = pupilCenterLeft;
 	oldPupilCenterRight = pupilCenterRight;
 
 
 
+	// TESTING: ONLY Combinations where no point is zero are used => to overcome false values
 
+	if (pupilCenterRight.x < 1 || pupilCenterRight.y < 1 || pupilCenterLeft.x < 1 || pupilCenterLeft.y < 1)
+	{
+		isValid = false;
+	}
 
 	// TESTING OUTPUT FOR CALIBRATIN PURPOSE ANNA
 
-
-	qDebug() << "Aperture_ Pupil right:" << pupilCenterRight.x << pupilCenterRight.y;
+	qDebug() << "Pupil right:" << pupilCenterRight.x << pupilCenterRight.y;
+	outputfile << "Pright" << pupilCenterRight.x << pupilCenterRight.y;
 
 
 	if (glintsRight.size() >0)
 	{
-		qDebug() << "Aperture_ G0:" << glintsRight[0].x << glintsRight[0].y;
+		outputfile << "G0:" << glintsRight[0].x << glintsRight[0].y;
+		qDebug() << "G0:" << glintsRight[0].x << glintsRight[0].y;
+
+
+		if (glintsRight[0].x < 1 || glintsRight[0].y < 1)
+		{
+			isValid = false;
+		}
+		
 	}
+	else
+	{
+		isValid = false;
+
+	}
+
 	if (glintsRight.size() >1)
 	{
-		qDebug() << "Aperture_ G1:" << glintsRight[1].x << glintsRight[1].y;
+		outputfile << "G1:" << glintsRight[1].x << glintsRight[1].y;
+
+		qDebug() << "G1:" << glintsRight[1].x << glintsRight[1].y;
+
+
+		if (glintsRight[1].x < 1 || glintsRight[1].y < 1)
+		{
+			isValid = false;
+		}
 	}
+	else
+	{
+		isValid = false;
+
+	}
+
 	if (glintsRight.size() >2)
 	{
-		qDebug() << "Aperture_ G2:" << glintsRight[2].x << glintsRight[2].y;
+		outputfile << "G2:" << glintsRight[2].x << glintsRight[2].y;
+		qDebug() << "G2:" << glintsRight[2].x << glintsRight[2].y;
+
+
+		if (glintsRight[2].x < 1 || glintsRight[2].y < 1)
+		{
+			isValid = false;
+		}
+	}
+	else
+	{
+		isValid = false;
+
 	}
 
 
-
-	qDebug() << "Aperture_ Pupil Left:" << pupilCenterLeft.x << pupilCenterLeft.y;
+	outputfile << "Pupil Left:" << pupilCenterLeft.x << pupilCenterLeft.y;
+	qDebug() << "Pupil Left:" << pupilCenterLeft.x << pupilCenterLeft.y;
 
 
 	if (glintsLeft.size() >0)
 	{
-		qDebug() << "Aperture_ G0:" << glintsLeft[0].x << glintsLeft[0].y;
+		outputfile << "G0:" << glintsLeft[0].x << glintsLeft[0].y;
+		qDebug() << "G0:" << glintsLeft[0].x << glintsLeft[0].y;
+
+		if (glintsLeft[0].x < 1 || glintsLeft[0].y < 1)
+		{
+			isValid = false;
+		}
 	}
+	else
+	{
+		isValid = false;
+
+	}
+
 	if (glintsLeft.size() >1)
 	{
-		qDebug() << "Aperture_ G1:" << glintsLeft[1].x << glintsLeft[1].y;
+		outputfile << "G1:" << glintsLeft[1].x << glintsLeft[1].y;
+		qDebug() << "G1:" << glintsLeft[1].x << glintsLeft[1].y;
+
+
+		if (glintsLeft[1].x < 1 || glintsLeft[1].y < 1)
+		{
+			isValid = false;
+		}
 	}
+	else
+	{
+		isValid = false;
+
+	}
+
 	if (glintsLeft.size() >2)
 	{
-		qDebug() << "Aperture_ G2:" << glintsLeft[2].x << glintsLeft[2].y;
+		outputfile << "G2:" << glintsLeft[2].x << glintsLeft[2].y;
+		qDebug() << "G2:" << glintsLeft[2].x << glintsLeft[2].y;
+
+		if (glintsLeft[2].x < 1 || glintsLeft[2].y < 1)
+		{
+			isValid = false;
+
+		}
+	}
+	else
+	{
+		isValid = false;
+
 	}
 
-
+	outputfile << endl;
+	if (!isValid2)
+	{
+		curPositions.valid = false;
+	}
 	return curPositions;
 }
 
@@ -2805,17 +2590,20 @@ cv::Point2d GoalkeeperAnalysis::detectPupil_SimpleBlobDetector(cv::Mat src)
 
 Point2d GoalkeeperAnalysis::calculateEyeVector(Point2d pupil, Point2d glint1, Point2d glint2, Point2d glint3)
 {
-	Point2d tmp = pupil + (glint1 - glint2 - glint3);
-
-	Point2d tmp2;
-	tmp2.x = abs(pupil.x - (glint1.x - glint2.x - glint3.x));
-	tmp2.y = abs(pupil.y - (glint1.y + glint2.y + glint3.y));
-	return tmp2;
+	Point2d tmp;
+	tmp.x = abs(pupil.x + (glint1.x - glint2.x - glint3.x));
+	tmp.y = abs(pupil.y + (glint1.y - glint2.y - glint3.y));
+	return tmp;
 }
 
 // calculates mean values for all pupil centers and glints found on each calibration cross and saves them
 void GoalkeeperAnalysis::getMeanValues(std::vector<pupilGlintCombiInstance> allPointsFoundOn, GoalkeeperAnalysis::calibrationPointCombination *tmpP)
 {
+
+
+	//long totalGlint0Left_x = 0;
+	//long totalGlint0Left_y = 0;
+
 	long fullGlintLeft_1X = 0;
 	long fullGlintLeft_1Y = 0;
 
@@ -2877,7 +2665,7 @@ void GoalkeeperAnalysis::getMeanValues(std::vector<pupilGlintCombiInstance> allP
 		fullPupilLeftY = fullPupilLeftY + allPointsFoundOn[i].pupilLeft.y;
 
 		allPointsFoundOn[i].pupilRight.x > 0 ? fullPupilRightX = fullPupilRightX + allPointsFoundOn[i].pupilRight.x : pupilRight_ZeroCount++;
-		fullPupilRightY = fullPupilRightY + allPointsFoundOn[i].pupilRight.x;
+		fullPupilRightY = fullPupilRightY + allPointsFoundOn[i].pupilRight.y;
 	}
 
 	
@@ -2919,7 +2707,7 @@ void GoalkeeperAnalysis::showResults()
 	byte timeToShowEachCross = 3;
 
 	// Initial Instruction window
-	Mat bg(screen_height, screen_width, CV_32F, cv::Scalar(255, 255, 255));
+	Mat bg(SCREEN_HEIGHT, SCREEN_WIDTH, CV_32F, cv::Scalar(255, 255, 255));
 	cvtColor(bg, bg, CV_GRAY2BGR);
 
 	putText(bg, "Results of calibration procedure ", Point2f(20, 20), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0, 0), 1);
@@ -2950,58 +2738,58 @@ void GoalkeeperAnalysis::showResults()
 
 
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10, screen_height / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 1     0,0
-	circle(bg, cv::Point2d(screen_width / 10, screen_height / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "1", Point2f((screen_width / 10) + 20, (screen_height / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point1.centerOfCrossOnScreen = cv::Point2d(screen_width / 10, screen_height / 15 * 2);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 1     0,0
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "1", Point2f((SCREEN_WIDTH / 10) + 20, (SCREEN_HEIGHT / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point1.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 2);
 	point1.name = "Point 1";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 2     0,1
-	circle(bg, cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "2", Point2f((screen_width / 10 * 5) + 20, (screen_height / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point2.centerOfCrossOnScreen = cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 2);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 2     0,1
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "2", Point2f((SCREEN_WIDTH / 10 * 5) + 20, (SCREEN_HEIGHT / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point2.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 2);
 	point2.name = "Point 2";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 3     0,2
-	circle(bg, cv::Point(screen_width / 10 * 9, screen_height / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "3", Point2f((screen_width / 10 * 9) + 20, (screen_height / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point3.centerOfCrossOnScreen = cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 2);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 2), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 3     0,2
+	circle(bg, cv::Point(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 2), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "3", Point2f((SCREEN_WIDTH / 10 * 9) + 20, (SCREEN_HEIGHT / 15 * 2) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point3.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 2);
 	point3.name = "Point 3";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10, screen_height / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 4     1,0
-	circle(bg, cv::Point2d(screen_width / 10, screen_height / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "4", Point2f((screen_width / 10) + 20, (screen_height / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point4.centerOfCrossOnScreen = cv::Point2d(screen_width / 10, screen_height / 15 * 7);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);              // 4     1,0
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "4", Point2f((SCREEN_WIDTH / 10) + 20, (SCREEN_HEIGHT / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point4.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 7);
 	point4.name = "Point 4";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 5     1,1 
-	circle(bg, cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "5", Point2f((screen_width / 10 * 5) + 20, (screen_height / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point5.centerOfCrossOnScreen = cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 7);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 5     1,1 
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "5", Point2f((SCREEN_WIDTH / 10 * 5) + 20, (SCREEN_HEIGHT / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point5.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 7);
 	point5.name = "Point 5";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 6     1,2
-	circle(bg, cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "6", Point2f((screen_width / 10 * 9) + 20, (screen_height / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point6.centerOfCrossOnScreen = cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 7);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 7), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);            // 6     1,2
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 7), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "6", Point2f((SCREEN_WIDTH / 10 * 9) + 20, (SCREEN_HEIGHT / 15 * 7) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point6.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 7);
 	point6.name = "Point 6";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10, screen_height / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);             // 7     2,0
-	circle(bg, cv::Point2d(screen_width / 10, screen_height / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "7", Point2f((screen_width / 10) + 20, (screen_height / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point7.centerOfCrossOnScreen = cv::Point2d(screen_width / 10, screen_height / 15 * 12);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);             // 7     2,0
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "7", Point2f((SCREEN_WIDTH / 10) + 20, (SCREEN_HEIGHT / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point7.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10, SCREEN_HEIGHT / 15 * 12);
 	point7.name = "Point 7";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 8     2,1
-	circle(bg, cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "8", Point2f((screen_width / 10 * 5) + 20, (screen_height / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point8.centerOfCrossOnScreen = cv::Point2d(screen_width / 10 * 5, screen_height / 15 * 12);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 8     2,1
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "8", Point2f((SCREEN_WIDTH / 10 * 5) + 20, (SCREEN_HEIGHT / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point8.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10 * 5, SCREEN_HEIGHT / 15 * 12);
 	point8.name = "Point 8";
 
-	cv::drawMarker(bg, cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 9     2,2
-	circle(bg, cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
-	putText(bg, "9", Point2f((screen_width / 10 * 9) + 20, (screen_height / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
-	point9.centerOfCrossOnScreen = cv::Point2d(screen_width / 10 * 9, screen_height / 15 * 12);
+	cv::drawMarker(bg, cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 12), cv::Scalar(0, 0, 0), MARKER_CROSS, 40, 2);           // 9     2,2
+	circle(bg, cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 12), 20, cv::Scalar(0, 0, 0), 1, 8, 0);
+	putText(bg, "9", Point2f((SCREEN_WIDTH / 10 * 9) + 20, (SCREEN_HEIGHT / 15 * 12) - 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 0, 0), 1);
+	point9.centerOfCrossOnScreen = cv::Point2d(SCREEN_WIDTH / 10 * 9, SCREEN_HEIGHT / 15 * 12);
 	point9.name = "Point 9";
 
 	imshow("Calibration", bg);
@@ -3049,8 +2837,8 @@ void GoalkeeperAnalysis::savePicture(int number, cv::Mat frame1, cv::Mat frame2)
 	if (!bright.empty() && !dark.empty())
 	{
 		
-		brightestPointRegion tmp = getEyeRegionsByBrightestPoints(frame1, frame2);
-		vector<Rect> eyeRegions = tmp.regions;
+		vector<Rect> eyeRegions = getEyeRegionsByBrightestPoints(frame1, frame2);
+		
 		eyeRegions.reserve(2);
 		// 1. Get separate Regions of Frame for both eyes
 		if (!eyeRegions.empty())
@@ -3263,8 +3051,8 @@ void GoalkeeperAnalysis::getDesktopResolution(int& horizontal, int& vertical)
 			//horizontal = desktop.right;
 			//vertical = desktop.bottom;
 
-	horizontal = screen_width;
-	vertical = screen_height;
+	horizontal = SCREEN_WIDTH;
+	vertical = SCREEN_HEIGHT;
 
 	cout << horizontal << '\n' << vertical << '\n';
 }
@@ -3626,12 +3414,6 @@ void GoalkeeperAnalysis::drawGaze()
 		gaze2frame.emplace(i,Point2d(i+10,i+10));
 	}
 
-
-
-
-
-
-
 	VideoCapture stimulus = VideoCapture::VideoCapture(userFile);
 	int userVideoWidth = stimulus.get(CV_CAP_PROP_FRAME_WIDTH);
 	int userVideoHeight = stimulus.get(CV_CAP_PROP_FRAME_HEIGHT);
@@ -3712,51 +3494,13 @@ cv::RotatedRect GoalkeeperAnalysis::detectPupilELSE(Mat frame1, Mat frame2)
 	cv::RotatedRect pupil;
 	pupil = ELSE::run(frame1, frame2,pupilSize);
 
-	/*
-
-	// get mean value around pupilCenter
-	if (pupil.center.x > 0 && pupil.center.y > 0)
-	{
-		Mat pupilRegion = frame1(Rect(pupil.center.x - 3, pupil.center.y - 3, 6, 6));
 
 
-		// 
-		Scalar mean, stddev;
-		cv::meanStdDev(pupilRegion, mean, stddev);
-		
-		double       mean_pxl = mean.val[0];
-		double       stddev_pxl = stddev.val[0];
-
-
-		qDebug() << "Pupil Mean Value: " << mean_pxl;
-		qDebug() << "Pupil STD Deviation Value: " << stddev_pxl;
-	
-	
-
-		Mat threshPup; 
-		Mat threshPup2;
-
-		//cv::normalize(frame1, workingFrame, 0, 255, NORM_MINMAX, CV_8UC3);
-
-		cv::threshold(frame1, threshPup, mean_pxl-3, 255, THRESH_BINARY_INV);
-		cv::threshold(frame1, threshPup2, stddev_pxl-3, 255, THRESH_BINARY);
-
-		imshow("ThreshPupil", threshPup);
-		imshow("2ThreshPupil", threshPup2);
-		waitKey(1);
-
-	}
-	*/
-
-	if (drawPupil)
+	if (drawDetection)
 	{
 		cv::drawMarker(frame1, pupil.center, cv::Scalar(0, 255, 0), MARKER_CROSS, 10, 1);              // 1     0,0
 	}
 		return pupil;
-
-
-
-
 }
 
 
@@ -3821,3 +3565,27 @@ void imshowscale(const std::string& name, cv::Mat& m, double scale)
 	cv::resize(m, res, cv::Size(), scale, scale, cv::INTER_NEAREST);
 	cv::imshow(name, res);
 }
+
+
+
+
+void GoalkeeperAnalysis::changeGamma(int v)
+{
+	// do something with class members or v;
+	cam.setGamma(v);
+}
+
+void GoalkeeperAnalysis::changeGain(int v)
+{
+	// do something with class members or v;
+	cam.setGain(v);
+
+}
+
+void GoalkeeperAnalysis::changeHWGain(int v)
+{
+	// do something with class members or v;
+	cam.setHWGain(v);
+
+}
+

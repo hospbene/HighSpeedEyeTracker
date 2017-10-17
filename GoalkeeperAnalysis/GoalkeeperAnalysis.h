@@ -73,6 +73,9 @@ class GoalkeeperAnalysis : public QMainWindow
 	public:
 		string uploadedVideo;
 		Dialog *dialog;
+		void changeGamma(int v);
+		void changeGain(int v);
+		void changeHWGain(int v);
 		GoalkeeperAnalysis(QWidget *parent = Q_NULLPTR);
 		void createUserFiles();
 		~GoalkeeperAnalysis();
@@ -91,6 +94,7 @@ class GoalkeeperAnalysis : public QMainWindow
 		// a temp Strcuture contains all found positions during one calibration point
 		struct pupilGlintCombiInstance
 		{
+			boolean valid = true;
 			cv::Point2f pupilLeft = 0;
 			cv::Point2f pupilRight = 0;
 			cv::Point2f glintLeft_1 = 0;
@@ -103,13 +107,14 @@ class GoalkeeperAnalysis : public QMainWindow
 
 			void toString()
 			{
-				qDebug() << "PupilLeft x=" << pupilLeft.x << " y=" << pupilLeft.y << "  PupilRight x=" << pupilRight.x << " y=" << pupilRight.y
-					<< "  GlintLeft_1 x=" << glintLeft_1.x << " y=" << glintLeft_1.y
-					<< "  GlintLeft_2 x=" << glintLeft_2.x << " y=" << glintLeft_2.y
-					<< "  GlintLeft_3 x=" << glintLeft_3.x << " y=" << glintLeft_3.y
-					<< "  GlintRight_1 x=" << glintRight_1.x << " y=" << glintRight_1.y
-					<< "  GlintRight_2 x=" << glintRight_2.x << " y=" << glintRight_2.y
-					<< "  GlintRight_3 x=" << glintRight_3.x << " y=" << glintRight_3.y;
+				qDebug() << "Pl x=" << pupilLeft.x << " y=" << pupilLeft.y 
+					<< "  G0l x=" << glintLeft_1.x << " y=" << glintLeft_1.y
+					<< "  G1l x=" << glintLeft_2.x << " y=" << glintLeft_2.y
+					<< "  G2l x=" << glintLeft_3.x << " y=" << glintLeft_3.y
+					<< "  |||||| Pr x=" << pupilRight.x << " y=" << pupilRight.y
+					<< "  G0r x=" << glintRight_1.x << " y=" << glintRight_1.y
+					<< "  G1r x=" << glintRight_2.x << " y=" << glintRight_2.y
+					<< "  G2r x=" << glintRight_3.x << " y=" << glintRight_3.y;
 			}
 		};
 	
@@ -126,7 +131,6 @@ class GoalkeeperAnalysis : public QMainWindow
 		std::ofstream outputfile;
 		std::ofstream userVideoFile;
 		std::ofstream eyeFile;
-		int glintLower = 152;
 
 		struct brightestPointRegion
 		{
@@ -137,11 +141,9 @@ class GoalkeeperAnalysis : public QMainWindow
 // GLINT AND BLOB DETECTION ===================================================================================================================
 
 			// Setup SimpleBlobDetector parameters.
-			SimpleBlobDetector::Params glintParams;
 			SimpleBlobDetector::Params pupilParams;
 
 			boolean glintsFound = false;
-			cv::Mat invSrc;
 			cv::Rect newAreaRect;
 			Point leftGlint;
 			Point rightGlint;
@@ -149,13 +151,10 @@ class GoalkeeperAnalysis : public QMainWindow
 			Point rightPupil;
 			Point leftPupilOriginal;
 			Point rightPupilOriginal;
-			Ptr<SimpleBlobDetector> glintDetector;
 			Ptr<SimpleBlobDetector> pupilDetector;
 
 
 // SAVING
-
-
 			// saves start time of video,
 			// end time of video
 			// each frame with framenumber and ms from start
@@ -197,38 +196,18 @@ class GoalkeeperAnalysis : public QMainWindow
 
 				void toString()
 				{
-					qDebug() << "Name: " << name << " PupilLeft x=" << pupilLeft.x << " y=" << pupilLeft.y << "  PupilRight x=" << pupilRight.x << " y=" << pupilRight.y;
-						//<< "  GlintLeft_1 x=" << glintLeft_1.x << " y=" << glintLeft_1.y
-						//<< "  GlintLeft_2 x=" << glintLeft_2.x << " y=" << glintLeft_2.y
-						//<< "  GlintLeft_3 x=" << glintLeft_3.x << " y=" << glintLeft_3.y
-						//<< "  GlintRight_1 x=" << glintRight_1.x << " y=" << glintRight_1.y
-						//<< "  GlintRight_2 x=" << glintRight_2.x << " y=" << glintRight_2.y
-						//<< "  GlintRight_3 x=" << glintRight_3.x << " y=" << glintRight_3.y;
+					qDebug() << "Name: " << name << " P_Left x=" << pupilLeft.x << " y=" << pupilLeft.y << "  P_Right x=" << pupilRight.x << " y=" << pupilRight.y
+						<< "  G1L x=" << glintLeft_1.x << " y=" << glintLeft_1.y
+						<< "  G2L x=" << glintLeft_2.x << " y=" << glintLeft_2.y
+						<< "  G3L x=" << glintLeft_3.x << " y=" << glintLeft_3.y
+						<< "  G1R x=" << glintRight_1.x << " y=" << glintRight_1.y
+						<< "  G2R x=" << glintRight_2.x << " y=" << glintRight_2.y
+						<< "  G3R x=" << glintRight_3.x << " y=" << glintRight_3.y;
 
-				}
-
-
-			
-
-				cv::Point2d distanzR()
-				{
-					//return sqrt(pow((pupilRight.x - glintRight.x), 2) + pow((pupilRight.y - glintRight.y), 2));
-					//return cv::Point2d(pupilRight.x - glintRight.x, pupilRight.y - glintRight.y);
-					return cv::Point2d(0, 0);
-				}
-
-				cv::Point2d distanzL()
-				{
-					//return sqrt(pow((pupilRight.x - glintRight.x), 2) + pow((pupilRight.y - glintRight.y), 2));
-					//return cv::Point2d(pupilLeft.x - glintLeft.x, pupilLeft.y - glintLeft.y);
-					return cv::Point2d(0, 0);
 				}
 			};
 
 			std::vector<calibrationPointCombination> allPoints;
-			std::vector<cv::Point3d> allComputedGlints;
-
-
 
 			// temp structure to save all found combinations during calibration on 
 			// defined point x as allPointsFoundOnX
@@ -245,7 +224,6 @@ class GoalkeeperAnalysis : public QMainWindow
 
 			calibrationPointCombination point1, point2, point3, point4, point5, point6, point7, point8, point9;
 
-
 			vector<Point2d> testPoints;
 			vector<Point2d> calcPoints1;
 			vector<Point2d> calcPoints2;
@@ -254,11 +232,7 @@ class GoalkeeperAnalysis : public QMainWindow
 	private:
 
 		QGraphicsScene *scene;
-		QPixmap image;
-		boolean fullUSBSpeed;
 		bool m_bIsCaptureRunning;		// FLAG, capturing running or capturing stopped
-		QTimer* m_pQTimer;						// timer for capturing frames
-		boolean captureFlag;
 		double FPS;
 		double exposureTime;
 
@@ -267,24 +241,21 @@ class GoalkeeperAnalysis : public QMainWindow
 		void UpdateGUI();
 		void collect();
 		Point2f estimate(Point2d original);
-		pupilGlintCombiInstance calcPupilGlintCombi(vector<Point2d> glintsLeft, vector<Point2d> glintsRight, int leftEyeMarginLeft, int leftEyeMarginTop, int rightEyeMarginLeft, int rightEyeMarginTop);
 		void captureFrame();
 		void saveVideoSmall(Mat frame1, Mat frame2);
-		brightestPointRegion getEyeRegionsByBrightestPoints(Mat frame1, Mat frame2);
+		vector<Rect> getEyeRegionsByBrightestPoints(Mat frame1, Mat frame2);
 		void saveFrames();
 		void initializeVideoWriter();
 		void showPlayback();
 		void savePicture(int number, cv::Mat frame1, cv::Mat frame2);
 		void compare();
-		std::vector<Point2d> detectGlints_orig(cv::Mat frame1, cv::Mat frame2);
-
-		std::vector<Point2d> detectGlintsOpt(cv::Mat brightFrame, cv::Mat darkFrame);
 		Point2d searchInSubArea(Point2d fatherPoint, Mat fatherArea, boolean left);
 		Point2d getBrightestPoint(Mat brightFrame);
 		pupilGlintCombiInstance detectGlintAndPupil(cv::Mat frame1, cv::Mat frame2);
 		RotatedRect fitEllipse_BHO(Mat img);
 		void equalizeGlints(Mat * frame, vector<Point2d> glints);
 		Point getPupil(Mat src);
+		GoalkeeperAnalysis::pupilGlintCombiInstance calcPupilGlintCombi(Point2d pupilRightWholeRef, Point2d pupilLeftWholeRef, vector<Point2d> glintsLeft, vector<Point2d> glintsRight, int leftEyeMarginLeft, int leftEyeMarginTop, int rightEyeMarginLeft, int rightEyeMarginTop);
 		void testDraw(pupilGlintCombiInstance cur, Mat * frame);
 		cv::Point2d detectPupil_SimpleBlobDetector(cv::Mat src);
 		void showGaze();
@@ -293,7 +264,6 @@ class GoalkeeperAnalysis : public QMainWindow
 		void calibrate();
 		void getLiveView();
 		int angle(cv::Point A, cv::Point B);
-		void setPupilDetectionParams();
 		void showCalibration();
 		void testingGaze();
 		void playVideo();

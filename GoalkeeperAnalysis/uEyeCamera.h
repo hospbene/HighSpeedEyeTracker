@@ -73,6 +73,10 @@ class uEyeCamera
 
 		void setGamma(int newVal);
 
+		void setGainBoost();
+
+		void setHWGain(int val);
+
 	private:
 
 // PRIVATE VARIABLES/CONSTANTS
